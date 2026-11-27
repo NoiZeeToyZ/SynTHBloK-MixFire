@@ -1,4 +1,6 @@
+#include "BoldFont.hpp"   // FONTS Nov 26
 #include "plugin.hpp"
+#include "SourceOled.hpp"
 #include "SynTHBloKMix24.hpp"
 #include "SynTHBloKMix24_layout.hpp"
 #pragma GCC diagnostic push
@@ -1214,6 +1216,10 @@ struct MixPanelText : TransparentWidget {
         nvgFillColor(a.vg, c);
         nvgText(a.vg, mm2px(xMm), mm2px(yMm), s, NULL);
     }
+    // FONTS Nov 26: section header 1.22x, real bold, #ececec (src/BoldFont.hpp)
+    void header(const DrawArgs& a, float xMm, float yMm, const char* s, float size) {
+        drawSectionHeader(a.vg, mm2px(xMm), mm2px(yMm), s, size);
+    }
     void draw(const DrawArgs& a) override {
         std::shared_ptr<window::Font> font = APP->window->uiFont;
         if (!font) return;
@@ -1240,15 +1246,15 @@ struct MixPanelText : TransparentWidget {
         }
         // master
         const float mc = MXL::MCOL + MXL::MCOL_W * 0.5f;
-        text(a, mc, 12.2f, "MASTER", 7.f, LBL);
+        header(a, mc, 12.2f, "MASTER", 7.f);   // FONTS Nov 26: section header
         static const char* const mk[5] = {"LVL", "WIDTH", "TILT", "GLUE", "CLIP"};
         for (int i = 0; i < 5; i++) text(a, MXL::MKX[i], MXL::MKY + 5.8f, mk[i], 5.5f, SUB);
-        text(a, mc, 94.4f, "ROW CV  /  MAIN OUT", 6.f, SUB);
+        header(a, mc, 94.4f, "ROW CV  /  MAIN OUT", 6.f);   // FONTS Nov 26: section header
         static const char* const jl[2][4] = {{"LVL", "PAN", "TILT", "DRIVE"}, {"AIR", "GLUE", "OUT L", "OUT R"}};
         for (int r = 0; r < 2; r++)
             for (int i = 0; i < 4; i++) text(a, MXL::JX[i], MXL::JY[r] - 4.8f, jl[r][i], 6.f, LBL);
         // FX
-        text(a, MXL::FC, 12.2f, "AUX FX", 7.f, LBL);
+        header(a, MXL::FC, 12.2f, "AUX FX", 7.f);   // FONTS Nov 26: section header
         static const char* const pl[3] = {"P1", "P2", "P3"};
         for (int i = 0; i < 3; i++) text(a, MXL::PX[i], MXL::PY + 7.f, pl[i], 6.f, LBL);
         text(a, MXL::FC, MXL::RET[1] + 12.f, "RETURN", 6.f, LBL);
@@ -1298,8 +1304,10 @@ SynTHBloKMix24Widget::SynTHBloKMix24Widget(SynTHBloKMix24* module) {
         auto* so = createParamCentered<MixSwitch>(mm(x + MXL::MB_DX, MXL::MB_Y), module, base[c] + 7);
         so->onCol = nvgRGBA(255, 205, 50, 255); so->label = "SOLO"; so->partner = -1;
         addParam(so);
-        addInput(createInputCentered<SmallJack>(mm(x + MXL::JDX, MXL::LJ_Y), module, inL[c]));
-        addInput(createInputCentered<SmallJack>(mm(x + MXL::JDX, MXL::RJ_Y), module, inL[c] + 1));
+        app::PortWidget* pl = createInputCentered<SmallJack>(mm(x + MXL::JDX, MXL::LJ_Y), module, inL[c]);
+        app::PortWidget* pr = createInputCentered<SmallJack>(mm(x + MXL::JDX, MXL::RJ_Y), module, inL[c] + 1);
+        addInput(pl); addInput(pr);
+        addChild(SourceOled::createBelow(x, c + 1, pl, pr));   // what's plugged in: under MUTE / SOLO (Nov 12 2026)
     }
 
     // master

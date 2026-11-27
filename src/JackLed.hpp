@@ -3,6 +3,7 @@
 // positive, blue for negative. It lights at once and fades over a few frames, so short triggers still flash.
 // Drawn by the widget, so the module needs no LightIds.
 #include "plugin.hpp"
+#include "OledUi.hpp"   // (BLOX THEMES: MTX parts themed)
 #include <functional>
 
 struct JackLed : widget::TransparentWidget {
@@ -22,7 +23,7 @@ struct JackLed : widget::TransparentWidget {
         float R = box.size.x * 0.5f;
         nvgBeginPath(args.vg);
         nvgCircle(args.vg, R, R, R);
-        nvgFillColor(args.vg, nvgRGB(0x22, 0x18, 0x10));
+        nvgFillColor(args.vg, oled::tRGB(0x22, 0x18, 0x10));
         nvgFill(args.vg);
     }
     void drawLayer(const DrawArgs& args, int layer) override {

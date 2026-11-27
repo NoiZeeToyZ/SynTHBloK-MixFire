@@ -1,5 +1,6 @@
 #pragma once
 #include "plugin.hpp"
+#include "OledUi.hpp"   // (BLOX THEMES: MTX parts themed)
 
 // Knob scale dashes, the same as the ones drawn into BloKMaster's panel SVG:
 // 11 ticks over 270 deg, orange end ticks, dim brown in between, long ticks at the ends and centre.
@@ -26,7 +27,7 @@ struct KnobTicks : TransparentWidget {
             nvgBeginPath(args.vg);
             nvgMoveTo(args.vg, cx + s * r0, cy + c * r0);
             nvgLineTo(args.vg, cx + s * r1, cy + c * r1);
-            nvgStrokeColor(args.vg, end ? nvgRGB(0xff, 0x7a, 0x00) : nvgRGB(0x6b, 0x42, 0x17));
+            nvgStrokeColor(args.vg, end ? oled::tRGB(0xff, 0x7a, 0x00) : oled::tRGB(0x6b, 0x42, 0x17));
             nvgStroke(args.vg);
         }
     }

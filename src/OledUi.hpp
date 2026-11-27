@@ -16,18 +16,40 @@
 //    controls beside it (e.g. as tall as a knob's ring)
 #include "plugin.hpp"
 #include <string>
+#include <cmath>
+#include <algorithm>
 
 namespace oled {
 
 static const float kRow = 4.4f;      // info line height, mm
 static const float kCellH = 4.4f;    // button cell height, mm
 
-inline NVGcolor amber(int a = 255) { return nvgRGBA(255, 190, 90, a); }
-inline NVGcolor dim() { return nvgRGBA(255, 190, 90, 130); }
-inline NVGcolor green() { return nvgRGBA(120, 230, 90, 255); }
-inline NVGcolor outline(int a = 80) { return nvgRGBA(255, 180, 90, a); }
-inline NVGcolor litFill() { return nvgRGBA(255, 112, 15, 235); }
-inline NVGcolor offFill() { return nvgRGBA(40, 25, 8, 255); }
+// BACKDROP RECOLOUR step 2 (Nov 20 2026): BACKDROP can hand every NoiZee ToyZ screen its theme colour (off: the usual amber)
+struct Theme { bool on = false; float r = 1.f, g = 0.745f, b = 0.353f; float rot = 0.f, sat = 1.f; };   // (BLOX THEMES: rot / sat)
+inline Theme& theme() { static Theme t; return t; }
+inline NVGcolor accent(int a) { const Theme& t = theme(); return nvgRGBA((int) (t.r * 255.f), (int) (t.g * 255.f), (int) (t.b * 255.f), a); }
+// BLOX THEMES (Nov 20 2026): BLOX's colour turn (themes.js nzShiftRGB): hue + rot, saturation x sat; near-greys stay
+inline NVGcolor shift(NVGcolor c) {
+    const Theme& t = theme();
+    if (t.rot == 0.f && t.sat == 1.f) return c;
+    float R = c.r, G = c.g, B = c.b, mx = std::max(R, std::max(G, B)), mn = std::min(R, std::min(G, B)), l = (mx + mn) * 0.5f, d = mx - mn;
+    if (d < 0.04f) return c;
+    float sv = l > 0.5f ? d / (2.f - mx - mn) : d / (mx + mn), h;
+    if (mx == R) h = ((G - B) / d + (G < B ? 6.f : 0.f)) * 60.f; else if (mx == G) h = ((B - R) / d + 2.f) * 60.f; else h = ((R - G) / d + 4.f) * 60.f;
+    h = std::fmod(std::fmod(h + t.rot, 360.f) + 360.f, 360.f); sv = std::min(1.f, sv * t.sat);
+    float q = l < 0.5f ? l * (1.f + sv) : l + sv - l * sv, p = 2.f * l - q;
+    auto f = [&](float k) { k = k - std::floor(k); return k < 1.f / 6.f ? p + (q - p) * 6.f * k : k < 0.5f ? q : k < 2.f / 3.f ? p + (q - p) * (2.f / 3.f - k) * 6.f : p; };
+    return nvgRGBAf(f(h / 360.f + 1.f / 3.f), f(h / 360.f), f(h / 360.f - 1.f / 3.f), c.a);
+}
+// (BLOX THEMES on the MTX parts) colour makers that follow the BACKDROP theme
+inline NVGcolor tRGB(unsigned char r, unsigned char g, unsigned char b) { return shift(nvgRGB(r, g, b)); }
+inline NVGcolor tRGBA(unsigned char r, unsigned char g, unsigned char b, unsigned char a) { return shift(nvgRGBA(r, g, b, a)); }
+inline NVGcolor amber(int a = 255) { return shift(nvgRGBA(255, 190, 90, a)); }
+inline NVGcolor dim() { return shift(nvgRGBA(255, 190, 90, 130)); }
+inline NVGcolor green() { return shift(nvgRGBA(120, 230, 90, 255)); }
+inline NVGcolor outline(int a = 80) { return shift(nvgRGBA(255, 180, 90, a)); }
+inline NVGcolor litFill() { return shift(nvgRGBA(255, 112, 15, 235)); }
+inline NVGcolor offFill() { return shift(nvgRGBA(40, 25, 8, 255)); }
 inline NVGcolor ink() { return nvgRGBA(20, 10, 2, 255); }
 
 // The display body.
@@ -69,6 +91,23 @@ inline void midiLine(const widget::Widget::DrawArgs& args, midi::Port* port, con
 }
 
 // The port menu a MIDI line opens.
+// The MTX header title, as on MTX-ECHO / MTX-DRUM: "SynTHBloK" in white, the module's name in spaced orange under it,
+// left at 8.5 mm (Nick, Nov 12 2026: every new module's faceplate title matches the others)
+inline void mtxTitle(NVGcontext* vg, const char* name) {
+    std::shared_ptr<window::Font> font = APP->window->uiFont;
+    if (!font) return;
+    nvgFontFaceId(vg, font->handle);
+    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_BASELINE);
+    nvgFontSize(vg, 11.f);
+    nvgTextLetterSpacing(vg, 0.f);
+    nvgFillColor(vg, nvgRGB(0xff, 0xff, 0xff));
+    nvgText(vg, mm2px(8.5f), mm2px(3.5f), "SynTHBloK", NULL);
+    nvgFontSize(vg, 10.f);
+    nvgTextLetterSpacing(vg, 0.8f);
+    nvgFillColor(vg, shift(nvgRGB(0xff, 0x7a, 0x00)));
+    nvgText(vg, mm2px(8.5f), mm2px(6.4f), name, NULL);
+    nvgTextLetterSpacing(vg, 0.f);
+}
 inline void midiMenu(midi::Port* port, const char* title) {
     if (!port) return;
     ui::Menu* menu = createMenu();

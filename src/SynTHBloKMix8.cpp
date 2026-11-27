@@ -1,6 +1,8 @@
 // SynTHBloK MIX-8 Fire Edition: the MIX-24 channel strip x 8, master bus, onboard aux FX + external FX loop.
 // 44 HP (MIX-12 with 8 strips). Labels and the title are drawn in code; the panel SVG holds only the background and section plates.
+#include "BoldFont.hpp"   // FONTS Nov 26
 #include "plugin.hpp"
+#include "SourceOled.hpp"
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmisleading-indentation"   // MIX-24's FX header packs statements onto one line
 #include "SynTHBloKMix24_fx.hpp"
@@ -70,6 +72,19 @@ struct SynTHBloKMix8 : Module {
 
     bool widthMode[M8_CH] = {};   // false: the knob pans, true: it sets stereo width
 
+    // AUTO TRIM (Nov 12 2026, set by RANDROYD through the patch data, off by default so existing patches don't change):
+    // a channel with a target (V RMS) learns its input's loudness over a few seconds while it plays and settles a trim
+    // (before the level knob) so the part lands on its target, whatever patch made it. Breakdowns don't pump it: the
+    // learning freezes when the part drops out or falls 12 dB under its running level; the trim moves at most ~3 dB/s.
+    // It learns for the first kLearnSec seconds a part plays, then HOLDS (Nov 12 2026, Nick: "allow user to adjust level
+    // after loading tracks"): a volume the user changes on the part's own module stays changed. A new part (trim 1) or a
+    // new target learns again; so does the menu's "Auto trim: learn the levels again".
+    float autoT[M8_CH] = {};       // target RMS in volts; 0 = off
+    float trim[M8_CH] = {1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f};
+    float atFast[M8_CH] = {}, atSlow[M8_CH] = {}, atAge[M8_CH] = {};
+    static constexpr float kLearnSec = 10.f;   // seconds of playing, then the trim holds
+    void relearn() { for (int c = 0; c < M8_CH; c++) { atAge[c] = 0.f; atSlow[c] = 0.f; } }
+
     // DSP state (index M8_CH = the master bus)
     float tiltState[M8_CH + 1][2] = {};
     float lpL[M8_CH] = {}, lpR[M8_CH] = {};
@@ -134,9 +149,33 @@ struct SynTHBloKMix8 : Module {
         json_t* a = json_array();
         for (int c = 0; c < M8_CH; c++) json_array_append_new(a, json_boolean(widthMode[c]));
         json_object_set_new(root, "widthMode", a);
+        bool anyAuto = false;
+        for (int c = 0; c < M8_CH; c++) anyAuto = anyAuto || autoT[c] > 0.f;
+        if (anyAuto) {
+            json_t* t = json_array();
+            json_t* g = json_array();
+            for (int c = 0; c < M8_CH; c++) { json_array_append_new(t, json_real(autoT[c])); json_array_append_new(g, json_real(trim[c])); }
+            json_object_set_new(root, "autoTrim", t);
+            json_object_set_new(root, "trim", g);
+        }
         return root;
     }
     void dataFromJson(json_t* root) override {
+        json_t* t = json_object_get(root, "autoTrim");
+        json_t* g = json_object_get(root, "trim");
+        for (int c = 0; c < M8_CH; c++) {
+            float nt = t ? (float) json_number_value(json_array_get(t, c)) : 0.f;
+            bool opening = autoT[c] <= 0.f && nt > 0.f;   // the patch (or a pasted / loaded module) arrives with its trims
+            if (nt != autoT[c]) atAge[c] = 0.f;   // a new target: learn again
+            autoT[c] = std::max(0.f, nt);
+            if (g && json_array_get(g, c)) {
+                float v = (float) json_number_value(json_array_get(g, c));
+                if (v == 1.f) { atAge[c] = 0.f; atSlow[c] = 0.f; }   // exactly 1: a new part on the strip, learn it fresh
+                else if (opening) atAge[c] = kLearnSec;             // learned before: hold it (the user's levels stay)
+                trim[c] = clamp(v, 0.125f, 2.8f);
+            }
+            if (autoT[c] <= 0.f) trim[c] = 1.f;
+        }
         json_t* a = json_object_get(root, "widthMode");
         if (!a) return;
         for (int c = 0; c < M8_CH; c++) {
@@ -146,6 +185,25 @@ struct SynTHBloKMix8 : Module {
     }
 
     static float dbToLin(float db) { return std::pow(10.f, db / 20.f); }
+
+    void autoTrim(int c, float& L, float& R, float dt) {
+        // note loudness, not density: a 50 ms RMS, then an envelope that rises in 0.1 s and falls over 3 s, so a part's
+        // level is how loud its notes are (sparse stabs aren't pushed up for playing less often)
+        float ms = 0.5f * (L * L + R * R);
+        atFast[c] += (ms - atFast[c]) * std::min(1.f, dt / 0.05f);
+        float sh = std::sqrt(std::max(0.f, atFast[c]));
+        atSlow[c] += (sh - atSlow[c]) * std::min(1.f, dt / (sh > atSlow[c] ? 0.1f : 3.f));
+        bool playing = sh > 0.003f && sh > atSlow[c] * 0.25f;   // learn only while the part plays (not in its gaps)
+        if (playing && atAge[c] < kLearnSec) {
+            atAge[c] += dt;
+            float want = clamp(autoT[c] / std::max(1e-4f, atSlow[c]), 0.125f, 2.8f);   // -18 .. +9 dB
+            float rate = (atAge[c] < 2.f ? 12.f : 3.f) * dt / 8.6859f;                  // dB/s in natural-log units
+            float d = std::log(want / trim[c]);
+            trim[c] *= std::exp(clamp(d, -rate, rate));
+        }
+        L *= trim[c];
+        R *= trim[c];
+    }
 
     void tilt(float& L, float& R, float t, int idx) {
         tiltState[idx][0] = tiltState[idx][0] * cTilt + L * (1.f - cTilt);
@@ -197,6 +255,7 @@ struct SynTHBloKMix8 : Module {
             if (lc && !rc) R = L;
             if (!lc && rc) L = R;
 
+            if (autoT[c] > 0.f) autoTrim(c, L, R, dt);
             float lvl = params[chP(c, K_LVL)].getValue();
             float pan = params[chP(c, K_PAN)].getValue();
             float tl = params[chP(c, K_TILT)].getValue();
@@ -720,6 +779,10 @@ struct M8PanelText : TransparentWidget {
         nvgFillColor(a.vg, c);
         nvgText(a.vg, mm2px(xMm), mm2px(yMm), s, NULL);
     }
+    // FONTS Nov 26: section header 1.22x, real bold, #ececec (src/BoldFont.hpp)
+    void header(const DrawArgs& a, float xMm, float yMm, const char* s, float size) {
+        drawSectionHeader(a.vg, mm2px(xMm), mm2px(yMm), s, size);
+    }
     void draw(const DrawArgs& a) override {
         std::shared_ptr<window::Font> font = APP->window->uiFont;
         if (!font) return;
@@ -745,15 +808,15 @@ struct M8PanelText : TransparentWidget {
         }
         // master
         const float mc = M8L::MCOL + M8L::MCOL_W * 0.5f;
-        text(a, mc, 12.2f, "MASTER", 7.f, LBL);
+        header(a, mc, 12.2f, "MASTER", 7.f);   // FONTS Nov 26: section header
         static const char* const mk[5] = {"LVL", "WIDTH", "TILT", "GLUE", "CLIP"};
         for (int i = 0; i < 5; i++) text(a, M8L::MKX[i], M8L::MKY + 5.8f, mk[i], 5.5f, SUB);
-        text(a, mc, 94.4f, "ROW CV  /  MAIN OUT", 6.f, SUB);
+        header(a, mc, 94.4f, "ROW CV  /  MAIN OUT", 6.f);   // FONTS Nov 26: section header
         static const char* const jl[2][4] = {{"LVL", "PAN", "TILT", "DRIVE"}, {"AIR", "GLUE", "OUT L", "OUT R"}};
         for (int r = 0; r < 2; r++)
             for (int i = 0; i < 4; i++) text(a, M8L::JX[i], M8L::JY[r] - 4.8f, jl[r][i], 6.f, LBL);
         // FX
-        text(a, M8L::FC, 12.2f, "AUX FX", 7.f, LBL);
+        header(a, M8L::FC, 12.2f, "AUX FX", 7.f);   // FONTS Nov 26: section header
         static const char* const pl[3] = {"P1", "P2", "P3"};
         for (int i = 0; i < 3; i++) text(a, M8L::PX[i], M8L::PY + 7.f, pl[i], 6.f, LBL);
         text(a, M8L::FC, M8L::RET_Y + 12.f, "RETURN", 6.f, LBL);
@@ -800,8 +863,10 @@ struct SynTHBloKMix8Widget : ModuleWidget {
             auto* so = createParamCentered<M8Switch>(mm(x + M8L::MB_DX, M8L::MB_Y), module, M8::chP(c, M8::K_SOLO));
             so->onCol = nvgRGBA(255, 205, 50, 255); so->label = "SOLO"; so->partner = -1;
             addParam(so);
-            addInput(createInputCentered<SmallJack>(mm(x, M8L::LJ_Y), module, M8::IN_INPUT + 2 * c));
-            addInput(createInputCentered<SmallJack>(mm(x, M8L::RJ_Y), module, M8::IN_INPUT + 2 * c + 1));
+            app::PortWidget* pl = createInputCentered<SmallJack>(mm(x, M8L::LJ_Y), module, M8::IN_INPUT + 2 * c);
+            app::PortWidget* pr = createInputCentered<SmallJack>(mm(x, M8L::RJ_Y), module, M8::IN_INPUT + 2 * c + 1);
+            addInput(pl); addInput(pr);
+            addChild(SourceOled::createBelow(x, c + 1, pl, pr));   // what's plugged in: under MUTE / SOLO (Nov 12 2026)
         }
 
         // master
@@ -844,6 +909,12 @@ struct SynTHBloKMix8Widget : ModuleWidget {
         M8* m = getModule<M8>();
         if (!m) return;
         ModulePictures::appendMenu(menu);
+        bool anyAuto = false;
+        for (int c = 0; c < M8_CH; c++) anyAuto = anyAuto || m->autoT[c] > 0.f;
+        if (anyAuto) {   // RANDROYD's AUTO TRIM: learns each part's level for 10 s after it loads, then holds
+            menu->addChild(new MenuSeparator);
+            menu->addChild(createMenuItem("Auto trim: learn the levels again (10 s)", "", [=]() { m->relearn(); }));
+        }
         menu->addChild(new MenuSeparator);
         menu->addChild(createMenuLabel("PAN / WIDTH knob"));
         menu->addChild(createMenuItem("All channels: pan", "", [=]() { for (int c = 0; c < M8_CH; c++) m->setWidthMode(c, false); }));

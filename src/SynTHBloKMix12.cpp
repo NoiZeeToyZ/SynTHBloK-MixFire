@@ -1,6 +1,8 @@
 // SynTHBloK MIX-12 Fire Edition: the MIX-24 channel strip x 12, master bus, onboard aux FX + external FX loop.
 // 55 HP. Labels and the title are drawn in code; the panel SVG holds only the background and section plates.
+#include "BoldFont.hpp"   // FONTS Nov 26
 #include "plugin.hpp"
+#include "SourceOled.hpp"
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmisleading-indentation"   // MIX-24's FX header packs statements onto one line
 #include "SynTHBloKMix24_fx.hpp"
@@ -70,6 +72,31 @@ struct SynTHBloKMix12 : Module {
 
     bool widthMode[M12_CH] = {};   // false: the knob pans, true: it sets stereo width
 
+    // AUTO TRIM (ported from MIX-8, Nov 13 2026: RANDROYD builds on MIX-12 now, 8 parts + SYMPHONICS). Off by default;
+    // RANDROYD sets a target (V RMS) per channel through the patch data; the channel learns its part's note loudness
+    // for its first kLearnSec seconds of playing, then holds (the user's levels stay). See MIX-8 for the details.
+    float autoT[M12_CH] = {};
+    float trim[M12_CH] = {};
+    float atFast[M12_CH] = {}, atSlow[M12_CH] = {}, atAge[M12_CH] = {};
+    static constexpr float kLearnSec = 10.f;
+    void relearn() { for (int c = 0; c < M12_CH; c++) { atAge[c] = 0.f; atSlow[c] = 0.f; } }
+    void autoTrim(int c, float& L, float& R, float dt) {
+        float ms = 0.5f * (L * L + R * R);
+        atFast[c] += (ms - atFast[c]) * std::min(1.f, dt / 0.05f);
+        float sh = std::sqrt(std::max(0.f, atFast[c]));
+        atSlow[c] += (sh - atSlow[c]) * std::min(1.f, dt / (sh > atSlow[c] ? 0.1f : 3.f));
+        bool playing = sh > 0.003f && sh > atSlow[c] * 0.25f;
+        if (playing && atAge[c] < kLearnSec) {
+            atAge[c] += dt;
+            float want = clamp(autoT[c] / std::max(1e-4f, atSlow[c]), 0.125f, 2.8f);
+            float rate = (atAge[c] < 2.f ? 12.f : 3.f) * dt / 8.6859f;
+            float d = std::log(want / trim[c]);
+            trim[c] *= std::exp(clamp(d, -rate, rate));
+        }
+        L *= trim[c];
+        R *= trim[c];
+    }
+
     // DSP state (index M12_CH = the master bus)
     float tiltState[M12_CH + 1][2] = {};
     float lpL[M12_CH] = {}, lpR[M12_CH] = {};
@@ -88,6 +115,7 @@ struct SynTHBloKMix12 : Module {
     SynTHBloKMix12() {
         config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
         for (int c = 0; c < M12_CH; c++) {
+            trim[c] = 1.f;
             int n = c + 1;
             configParam(chP(c, K_LVL), 0.f, 2.f, 1.f, string::f("CH %d level", n));
             configParam(chP(c, K_PAN), -1.f, 1.f, 0.f, string::f("CH %d pan", n));
@@ -134,9 +162,33 @@ struct SynTHBloKMix12 : Module {
         json_t* a = json_array();
         for (int c = 0; c < M12_CH; c++) json_array_append_new(a, json_boolean(widthMode[c]));
         json_object_set_new(root, "widthMode", a);
+        bool anyAuto = false;
+        for (int c = 0; c < M12_CH; c++) anyAuto = anyAuto || autoT[c] > 0.f;
+        if (anyAuto) {
+            json_t* t = json_array();
+            json_t* g = json_array();
+            for (int c = 0; c < M12_CH; c++) { json_array_append_new(t, json_real(autoT[c])); json_array_append_new(g, json_real(trim[c])); }
+            json_object_set_new(root, "autoTrim", t);
+            json_object_set_new(root, "trim", g);
+        }
         return root;
     }
     void dataFromJson(json_t* root) override {
+        json_t* t = json_object_get(root, "autoTrim");
+        json_t* g = json_object_get(root, "trim");
+        for (int c = 0; c < M12_CH; c++) {
+            float nt = t ? (float) json_number_value(json_array_get(t, c)) : 0.f;
+            bool opening = autoT[c] <= 0.f && nt > 0.f;
+            if (nt != autoT[c]) atAge[c] = 0.f;
+            autoT[c] = std::max(0.f, nt);
+            if (g && json_array_get(g, c)) {
+                float v = (float) json_number_value(json_array_get(g, c));
+                if (v == 1.f) { atAge[c] = 0.f; atSlow[c] = 0.f; }
+                else if (opening) atAge[c] = kLearnSec;
+                trim[c] = clamp(v, 0.125f, 2.8f);
+            }
+            if (autoT[c] <= 0.f) trim[c] = 1.f;
+        }
         json_t* a = json_object_get(root, "widthMode");
         if (!a) return;
         for (int c = 0; c < M12_CH; c++) {
@@ -196,6 +248,8 @@ struct SynTHBloKMix12 : Module {
             float L = lc ? il.getVoltage() : 0.f, R = rc ? ir.getVoltage() : 0.f;
             if (lc && !rc) R = L;
             if (!lc && rc) L = R;
+
+            if (autoT[c] > 0.f) autoTrim(c, L, R, dt);
 
             float lvl = params[chP(c, K_LVL)].getValue();
             float pan = params[chP(c, K_PAN)].getValue();
@@ -720,6 +774,10 @@ struct M12PanelText : TransparentWidget {
         nvgFillColor(a.vg, c);
         nvgText(a.vg, mm2px(xMm), mm2px(yMm), s, NULL);
     }
+    // FONTS Nov 26: section header 1.22x, real bold, #ececec (src/BoldFont.hpp)
+    void header(const DrawArgs& a, float xMm, float yMm, const char* s, float size) {
+        drawSectionHeader(a.vg, mm2px(xMm), mm2px(yMm), s, size);
+    }
     void draw(const DrawArgs& a) override {
         std::shared_ptr<window::Font> font = APP->window->uiFont;
         if (!font) return;
@@ -745,15 +803,15 @@ struct M12PanelText : TransparentWidget {
         }
         // master
         const float mc = M12L::MCOL + M12L::MCOL_W * 0.5f;
-        text(a, mc, 12.2f, "MASTER", 7.f, LBL);
+        header(a, mc, 12.2f, "MASTER", 7.f);   // FONTS Nov 26: section header
         static const char* const mk[5] = {"LVL", "WIDTH", "TILT", "GLUE", "CLIP"};
         for (int i = 0; i < 5; i++) text(a, M12L::MKX[i], M12L::MKY + 5.8f, mk[i], 5.5f, SUB);
-        text(a, mc, 94.4f, "ROW CV  /  MAIN OUT", 6.f, SUB);
+        header(a, mc, 94.4f, "ROW CV  /  MAIN OUT", 6.f);   // FONTS Nov 26: section header
         static const char* const jl[2][4] = {{"LVL", "PAN", "TILT", "DRIVE"}, {"AIR", "GLUE", "OUT L", "OUT R"}};
         for (int r = 0; r < 2; r++)
             for (int i = 0; i < 4; i++) text(a, M12L::JX[i], M12L::JY[r] - 4.8f, jl[r][i], 6.f, LBL);
         // FX
-        text(a, M12L::FC, 12.2f, "AUX FX", 7.f, LBL);
+        header(a, M12L::FC, 12.2f, "AUX FX", 7.f);   // FONTS Nov 26: section header
         static const char* const pl[3] = {"P1", "P2", "P3"};
         for (int i = 0; i < 3; i++) text(a, M12L::PX[i], M12L::PY + 7.f, pl[i], 6.f, LBL);
         text(a, M12L::FC, M12L::RET_Y + 12.f, "RETURN", 6.f, LBL);
@@ -800,8 +858,10 @@ struct SynTHBloKMix12Widget : ModuleWidget {
             auto* so = createParamCentered<M12Switch>(mm(x + M12L::MB_DX, M12L::MB_Y), module, M12::chP(c, M12::K_SOLO));
             so->onCol = nvgRGBA(255, 205, 50, 255); so->label = "SOLO"; so->partner = -1;
             addParam(so);
-            addInput(createInputCentered<SmallJack>(mm(x, M12L::LJ_Y), module, M12::IN_INPUT + 2 * c));
-            addInput(createInputCentered<SmallJack>(mm(x, M12L::RJ_Y), module, M12::IN_INPUT + 2 * c + 1));
+            app::PortWidget* pl = createInputCentered<SmallJack>(mm(x, M12L::LJ_Y), module, M12::IN_INPUT + 2 * c);
+            app::PortWidget* pr = createInputCentered<SmallJack>(mm(x, M12L::RJ_Y), module, M12::IN_INPUT + 2 * c + 1);
+            addInput(pl); addInput(pr);
+            addChild(SourceOled::createBelow(x, c + 1, pl, pr));   // what's plugged in: under MUTE / SOLO (Nov 12 2026)
         }
 
         // master
@@ -844,6 +904,12 @@ struct SynTHBloKMix12Widget : ModuleWidget {
         M12* m = getModule<M12>();
         if (!m) return;
         ModulePictures::appendMenu(menu);
+        bool anyAuto = false;
+        for (int c = 0; c < M12_CH; c++) anyAuto = anyAuto || m->autoT[c] > 0.f;
+        if (anyAuto) {   // RANDROYD's AUTO TRIM: learns each part's level for 10 s after it loads, then holds
+            menu->addChild(new MenuSeparator);
+            menu->addChild(createMenuItem("Auto trim: learn the levels again (10 s)", "", [=]() { m->relearn(); }));
+        }
         menu->addChild(new MenuSeparator);
         menu->addChild(createMenuLabel("PAN / WIDTH knob"));
         menu->addChild(createMenuItem("All channels: pan", "", [=]() { for (int c = 0; c < M12_CH; c++) m->setWidthMode(c, false); }));
